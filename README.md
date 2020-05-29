@@ -11,6 +11,10 @@ Install the dependencies:
 - cargo (stable)
 
 ```
+apt install libmp3lame-dev
+```
+
+```
 $ cargo build --release
 # cargo install
 ```

@@ -331,7 +331,7 @@ impl Incoming {
     fn process(&mut self) -> Result<Option<(String, Agent, Vec<api::Header>)>, ()> {
         self.last_action = time::Instant::now();
         if self.read().is_ok() {
-            let mut headers = [httparse::EMPTY_HEADER; 16];
+            let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
             match req.parse(&self.buf[..self.len]) {
                 Ok(httparse::Status::Complete(_)) => {
@@ -395,7 +395,7 @@ impl Client {
             format!("HTTP/1.1 200 OK"),
             format!("Server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
             format!("Content-Type: {}", if let Container::MP3 = config.container {
-                "audio/mpeg"
+                "audio/mpeg;codecs=mp3"
             } else if let Container::FLAC = config.container {
                 "audio/flac"
             } else if let Container::AAC = config.container {

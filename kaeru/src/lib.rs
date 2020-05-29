@@ -44,6 +44,7 @@ pub struct Graph {
     graph: GraphP,
     #[allow(dead_code)]
     splitter: *mut sys::AVFilterContext, // We don't actually need this, but it's nice to have
+    volume: *mut sys::AVFilterContext, // We don't actually need this, but it's nice to have
     in_frame: *mut sys::AVFrame,
     out_frame: *mut sys::AVFrame,
     input: GraphInput,
@@ -252,18 +253,23 @@ impl GraphBuilder {
                 // OPUS only supports 48kHz sample rates
                 (*output.codec_ctx).sample_rate = 48000;
             } else if (*output.codec_ctx).codec_id == sys::AVCodecID::AV_CODEC_ID_AAC {
-                (*output.codec_ctx).sample_rate = 48000;
+                (*output.codec_ctx).sample_rate = 44100;
             } else if (*output.codec_ctx).codec_id == sys::AVCodecID::AV_CODEC_ID_MP3 {
                 // MP3 can't handle 192 kHz, so encode at 44.1
                 (*output.codec_ctx).sample_rate = 44100;
+            } else if (*output.codec_ctx).codec_id == sys::AVCodecID::AV_CODEC_ID_FLAC {
+                // Force Settings for constant FLAC 16-bit CD quality
+                (*output.codec_ctx).sample_rate = 44100;
+                (*output.codec_ctx).sample_fmt = sys::AVSampleFormat_AV_SAMPLE_FMT_S16;
+                (*output.codec_ctx).compression_level = 7;
             } else {
                 (*output.codec_ctx).sample_rate = (*input.codec_ctx).sample_rate;
             }
             if (*output.codec_ctx).bit_rate == 0 {
                 (*output.codec_ctx).bit_rate = (*input.codec_ctx).bit_rate;
             }
-            (*output.codec_ctx).channel_layout = (*input.codec_ctx).channel_layout;
-            (*output.codec_ctx).channels = sys::av_get_channel_layout_nb_channels((*input.codec_ctx).channel_layout);
+            (*output.codec_ctx).channel_layout = sys::AV_CH_LAYOUT_STEREO as u64;
+            (*output.codec_ctx).channels = sys::av_get_channel_layout_nb_channels((*output.codec_ctx).channel_layout);
             let time_base = sys::AVRational {
                 num: 1,
                 den: (*output.codec_ctx).sample_rate,
@@ -271,7 +277,7 @@ impl GraphBuilder {
             (*output.codec_ctx).time_base = time_base;
             (*output.stream).time_base = time_base;
 
-            sys::av_dict_copy(&mut (*output.ctx).metadata, (*self.input.input.ctx).metadata, 0);
+            //sys::av_dict_copy(&mut (*output.ctx).metadata, (*self.input.input.ctx).metadata, 0);
 
             match sys::avcodec_open2(output.codec_ctx, (*output.codec_ctx).codec, ptr::null_mut()) {
                 0 => { }
@@ -282,10 +288,11 @@ impl GraphBuilder {
                 e => return Err(ErrorKind::FFmpeg("failed to configure output stream", e).into()),
             }
 
+            let id = format!("out{}\0", self.outputs.len());
+
             // Create and configure the sink filter
             let buffersink = sys::avfilter_get_by_name(str_conv!("abuffersink\0"));
             ck_null!(buffersink);
-            let id = format!("out{}\0", self.outputs.len());
             let buffersink_ctx = sys::avfilter_graph_alloc_filter(self.graph.ptr, buffersink, str_conv!(id));
             ck_null!(buffersink_ctx);
 
@@ -318,6 +325,27 @@ impl GraphBuilder {
 
     pub fn build(self) -> Result<Graph> {
         unsafe {
+
+
+            // Create and configure the volume / ReplayGain filter
+            let volume = sys::avfilter_get_by_name(str_conv!("volume\0"));
+            ck_null!(volume);
+            let volume_ctx = sys::avfilter_graph_alloc_filter(self.graph.ptr, volume, str_conv!("replaygain\0"));
+            ck_null!(volume_ctx);
+
+            match sys::av_opt_set(volume_ctx as *mut c_void, str_conv!("replaygain\0"), str_conv!("track\0"), sys::AV_OPT_SEARCH_CHILDREN as i32) {
+                0 => { }
+                e => return Err(ErrorKind::FFmpeg("failed to configure replaygain", e).into()),
+            }
+            match sys::avfilter_init_str(volume_ctx, ptr::null()) {
+                0 => { }
+                e => return Err(ErrorKind::FFmpeg("failed to initialize replaygain", e).into()),
+            }
+            match sys::avfilter_link(self.input.ctx, 0, volume_ctx, 0) {
+                0 => { }
+                e => return Err(ErrorKind::FFmpeg("failed to link volume to input", e).into()),
+            }
+
             // Create the audio split filter and wire it up
             let asplit = sys::avfilter_get_by_name(str_conv!("asplit\0"));
             ck_null!(asplit);
@@ -331,7 +359,7 @@ impl GraphBuilder {
                 0 => { }
                 e => return Err(ErrorKind::FFmpeg("failed to initialize asplit", e).into()),
             }
-            match sys::avfilter_link(self.input.ctx, 0, asplit_ctx, 0) {
+            match sys::avfilter_link(volume_ctx, 0, asplit_ctx, 0) {
                 0 => { }
                 e => return Err(ErrorKind::FFmpeg("failed to link input to asplit", e).into()),
             }
@@ -361,6 +389,7 @@ impl GraphBuilder {
                 out_frame: sys::av_frame_alloc(),
                 outputs: self.outputs,
                 splitter: asplit_ctx,
+                volume: volume_ctx,
             })
         }
     }
@@ -386,7 +415,7 @@ impl Input {
             let cstr = CString::new(container).unwrap();
             let format = sys::av_find_input_format(cstr.as_ptr());
             if format.is_null() {
-                bail!("Could not derive format from container!");
+                bail!("Could not derive format from container {}!", container);
             }
             let ctx = match sys::avformat_open_input(&mut ps, ptr::null(), format, ptr::null_mut()) {
                 0 => ps,

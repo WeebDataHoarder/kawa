@@ -18,7 +18,7 @@ struct RadioConn {
 }
 
 const SYNC_AHEAD: u64 = 1;
-const MAX_FALL_BEHIND: u64 = 2;
+const MAX_FALL_BEHIND: u64 = 5;
 
 struct Syncer {
     last_pts: f64,
