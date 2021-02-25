@@ -207,7 +207,7 @@ pub fn start_api(config: ApiConfig, queue: Arc<Mutex<Queue>>, listeners: Listene
             chan: chan,
             listeners,
         };
-        rouille::start_server(("127.0.0.1", config.port), move |request| {
+        rouille::start_server((config.host, config.port), move |request| {
             serv.handle_request(request)
         });
     });

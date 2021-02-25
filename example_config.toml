@@ -1,7 +1,9 @@
 [api]
 #
-# The HTTP port the Kawa API listens on. Kawa will listen on localhost.
+# The HTTP port the Kawa API listens on.
 port=4040
+# The host to listen on
+host="127.0.0.1"
 
 [queue]
 # 
@@ -26,7 +28,7 @@ fallback="/tmp/in.flac"
 
 [radio]
 #
-# The port to stream actual audio on. Kawa will listen on localhost.
+# The port to stream actual audio on. Kawa will listen on 0.0.0.0.
 port=8001
 # Name of the stream.
 name="my radio"

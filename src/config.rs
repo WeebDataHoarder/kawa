@@ -31,6 +31,7 @@ pub struct RadioConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiConfig {
+    pub host: String,
     pub port: u16,
 }
 
