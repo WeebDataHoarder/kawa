@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "kawa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "amy 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "env_logger 0.5.13 (registry+https://github.com/rust-lang/crates.io-index)",

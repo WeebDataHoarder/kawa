@@ -17,6 +17,7 @@ pub struct Queue {
     entries: VecDeque<QueueEntry>,
     next: QueueBuffer,
     np: QueueBuffer,
+    random: Option<QueueEntry>,
     counter: u64,
     last_id: u64,
     cfg: Config,
@@ -47,6 +48,7 @@ impl Queue {
             np: Default::default(),
             next: Default::default(),
             entries: VecDeque::new(),
+            random: Default::default(),
             cfg: cfg,
             counter: 0,
             last_id: 0,
@@ -57,6 +59,9 @@ impl Queue {
 
     pub fn np(&self) -> &QueueBuffer {
         &self.np
+    }
+    pub fn random(&self) -> &Option<QueueEntry> {
+        &self.random
     }
 
     pub fn entries(&self) -> &VecDeque<QueueEntry> {
@@ -182,6 +187,7 @@ impl Queue {
             .and_then(|v| NewQueueEntry::deserialize(v))
             .map(|v| self.queue_entry_from_new(v));
         if res.is_some() {
+            self.random = res.clone();
             info!("Using random entry {:?}", res.as_ref().unwrap());
         }
         res

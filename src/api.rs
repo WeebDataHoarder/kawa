@@ -80,6 +80,21 @@ impl Server {
                         serde::to_string(&q.entries().iter().map(|e| e.serialize()).collect::<Vec<_>>()).unwrap())
                 },
 
+                (GET) (/random) => {
+                    debug!("Handling random req");
+                    let q = self.queue.lock().unwrap();
+                    if q.random().is_some() {
+                        rouille::Response::from_data(
+                            "application/json",
+                            serde::to_string(&q.random().as_ref().unwrap().serialize()).unwrap())
+                    } else {
+                        rouille::Response::from_data(
+                            "application/json",
+                            serde::to_string(&Resp::failure("no next random exists")).unwrap()
+                        ).with_status_code(503)
+                    }
+                },
+
                 (POST) (/queue/head) => {
                     match serde::from_reader(req.data().unwrap()).map(|d| NewQueueEntry::deserialize(d)) {
                         Ok(Some(qe)) => {

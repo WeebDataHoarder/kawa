@@ -1,7 +1,7 @@
 [package]
 name = "kawa"
-version = "0.1.0"
-authors = ["Luminarys <postmaster@gensok.io>", "ParadoxSpiral <ParadoxSpiral@riseup.net>"]
+version = "0.2.0"
+authors = ["Luminarys <postmaster@gensok.io>", "ParadoxSpiral <ParadoxSpiral@riseup.net>", "WeebDataHoarder <57538841+WeebDataHoarder@users.noreply.github.com>"]
 
 [features]
 default = []
