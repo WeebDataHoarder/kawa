@@ -39,6 +39,7 @@ pub struct ApiConfig {
 pub struct QueueConfig {
     pub random: String,
     pub np: String,
+    pub nr: String,
     pub fallback: (Arc<Vec<u8>>, String),
 }
 
@@ -75,6 +76,7 @@ struct InternalQueueConfig {
     #[serde(rename = "random_song_api")]
     pub random: String,
     pub np: String,
+    pub nr: String,
     pub fallback: String,
 }
 
@@ -131,6 +133,7 @@ impl InternalConfig {
                queue: QueueConfig {
                     random: self.queue.random,
                     np: self.queue.np,
+                    nr: self.queue.nr,
                     fallback: (Arc::new(buffer), fbp.to_owned()),
                },
            })

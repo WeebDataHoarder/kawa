@@ -160,11 +160,18 @@ pub fn start_streams(cfg: Config,
 
         debug!("Broadcasting np");
         let np = queue.lock().unwrap().np().entry().clone();
-        if let Err(e) = broadcast_np(&cfg.queue.np, np) {
+        if let Err(e) = broadcast_song(&cfg.queue.np, np) {
             warn!("Failed to broadcast np: {}", e);
         }
 
         queue.lock().unwrap().start_next_tc();
+
+        debug!("Broadcasting nr");
+        let nr = queue.lock().unwrap().random().as_ref().unwrap().clone();
+        if let Err(e) = broadcast_song(&cfg.queue.nr, nr) {
+            warn!("Failed to broadcast nr: {}", e);
+        }
+
         debug!("Entering main loop");
 
         // Song activity loop - ensures that the song is properly transcoding and handles any sort
@@ -210,7 +217,7 @@ pub fn start_streams(cfg: Config,
     }
 }
 
-fn broadcast_np(url: &str, song: QueueEntry) -> Result<(), reqwest::Error> {
+fn broadcast_song(url: &str, song: QueueEntry) -> Result<(), reqwest::Error> {
     let client = reqwest::blocking::Client::new();
     client.post(url)
         .json(&song.serialize())

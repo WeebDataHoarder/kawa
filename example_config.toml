@@ -22,6 +22,10 @@ random_song_api="http://localhost:8012/api/random"
 # will be identical to the JSON blob in the queue.
 np="http://localhost:8012/api/np"
 #
+# An HTTP POST is issued to this URL when Kawa fetches a random track. The body
+# will be identical to the JSON blob in memory.
+nr="http://localhost:8012/api/nr"
+#
 # When no tracks are available for whatever reason (such as external service
 # outages), this track will be played.
 fallback="/tmp/in.flac"
