@@ -7,7 +7,7 @@ authors = ["Luminarys <postmaster@gensok.io>"]
 version = "0.2"
 
 [dependencies.error-chain]
-version = "0.10"
+version = "0.12"
 
 [dependencies.ffmpeg-sys]
 version = "4.1.3"
