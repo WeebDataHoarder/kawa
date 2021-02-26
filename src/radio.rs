@@ -166,11 +166,14 @@ pub fn start_streams(cfg: Config,
 
         queue.lock().unwrap().start_next_tc();
 
-        debug!("Broadcasting nr");
-        let nr = queue.lock().unwrap().random().as_ref().unwrap().clone();
-        if let Err(e) = broadcast_song(&cfg.queue.nr, nr) {
-            warn!("Failed to broadcast nr: {}", e);
+        if queue.lock().unwrap().random().is_some() {
+            debug!("Broadcasting nr");
+            let nr = queue.lock().unwrap().random().as_ref().unwrap().clone();
+            if let Err(e) = broadcast_song(&cfg.queue.nr, nr) {
+                warn!("Failed to broadcast nr: {}", e);
+            }
         }
+
 
         debug!("Entering main loop");
 
