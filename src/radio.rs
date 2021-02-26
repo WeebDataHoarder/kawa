@@ -139,7 +139,7 @@ pub fn start_streams(cfg: Config,
     let mut rconns: Vec<_> = cfg.streams.iter().enumerate()
         .map(|(id, _)| {
             RadioConn::new(id,
-                             btx.try_clone().unwrap(),
+                             btx.clone(),
                              )
         })
         .collect();
@@ -211,7 +211,7 @@ pub fn start_streams(cfg: Config,
 }
 
 fn broadcast_np(url: &str, song: QueueEntry) -> Result<(), reqwest::Error> {
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
     client.post(url)
         .json(&song.serialize())
         .send()?;

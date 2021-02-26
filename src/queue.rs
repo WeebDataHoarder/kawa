@@ -180,7 +180,7 @@ impl Queue {
 
     fn random_buffer(&mut self) -> Option<QueueEntry> {
         let mut body = String::new();
-        let res = reqwest::get(&self.cfg.queue.random.clone())
+        let res = reqwest::blocking::get(&self.cfg.queue.random.clone())
             .ok()
             .and_then(|mut r| r.read_to_string(&mut body).ok())
             .and_then(|_| serde::from_str(&body).ok())

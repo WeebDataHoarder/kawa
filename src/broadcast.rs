@@ -102,7 +102,7 @@ pub fn start(cfg: &Config, listeners: api::Listeners) -> amy::Sender<Buffer> {
 impl Broadcaster {
     pub fn new(cfg: &Config, listeners: api::Listeners) -> io::Result<(Broadcaster, amy::Sender<Buffer>)> {
         let poll = amy::Poller::new()?;
-        let mut reg = poll.get_registrar()?;
+        let mut reg = poll.get_registrar();
         let listener = TcpListener::bind((Ipv4Addr::new(0, 0, 0, 0), cfg.radio.port))?;
         listener.set_nonblocking(true)?;
         let lid = reg.register(&listener, amy::Event::Read)?;
