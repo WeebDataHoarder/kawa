@@ -405,7 +405,8 @@ impl Client {
             }),
             format!("Transfer-Encoding: chunked"),
             format!("Connection: keep-alive"),
-            format!("Cache-Control: no-cache"),
+            format!("Cache-Control: no-store, max-age=0, no-transform"),
+            format!("Accept-Ranges: none"),
             format!("x-audiocast-name: {}", name),
             match config.bitrate {
 		Some(bitrate) => format!("x-audiocast-bitrate: {}", bitrate),

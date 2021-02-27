@@ -44,6 +44,7 @@ pub struct Graph {
     graph: GraphP,
     #[allow(dead_code)]
     splitter: *mut sys::AVFilterContext, // We don't actually need this, but it's nice to have
+    #[allow(dead_code)]
     volume: *mut sys::AVFilterContext, // We don't actually need this, but it's nice to have
     in_frame: *mut sys::AVFrame,
     out_frame: *mut sys::AVFrame,
@@ -193,7 +194,7 @@ impl Graph {
         // Flush everything
         res = res.and(self.process_frame(ptr::null_mut()));
         for o in self.outputs.iter() {
-            // If the codec needs flushing, do so
+            // If the codec needs flushing, do so, TODO check this
             if ((*(*o.output.codec_ctx).codec).capabilities as u32 & sys::AV_CODEC_CAP_DELAY) != 0 {
                 res = res.and(o.output.write_frame(ptr::null_mut()));
             }
@@ -262,6 +263,7 @@ impl GraphBuilder {
                 (*output.codec_ctx).sample_rate = 44100;
                 (*output.codec_ctx).sample_fmt = sys::AVSampleFormat_AV_SAMPLE_FMT_S16;
                 (*output.codec_ctx).compression_level = 7;
+                (*output.codec_ctx).frame_size = 4096;
             } else {
                 (*output.codec_ctx).sample_rate = (*input.codec_ctx).sample_rate;
             }
@@ -277,7 +279,9 @@ impl GraphBuilder {
             (*output.codec_ctx).time_base = time_base;
             (*output.stream).time_base = time_base;
 
+            //Do not copy metadata
             //sys::av_dict_copy(&mut (*output.ctx).metadata, (*self.input.input.ctx).metadata, 0);
+            *&mut (*output.ctx).metadata = ptr::null_mut();
 
             match sys::avcodec_open2(output.codec_ctx, (*output.codec_ctx).codec, ptr::null_mut()) {
                 0 => { }
