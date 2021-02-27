@@ -20,6 +20,7 @@ pub struct Queue {
     random: Option<QueueEntry>,
     counter: u64,
     last_id: u64,
+    absolute_pts: i64,
     cfg: Config,
 }
 
@@ -51,6 +52,7 @@ impl Queue {
             random: Default::default(),
             cfg: cfg,
             counter: 0,
+            absolute_pts: 0,
             last_id: 0,
         };
         q.start_next_tc();
@@ -197,6 +199,8 @@ impl Queue {
         let mut prebufs = Vec::new();
         let input = kaeru::Input::new(BufReader::with_capacity(INPUT_BUF_LEN, s), container)?;
         let metadata = sync::Arc::new(input.metadata());
+        let pts = self.absolute_pts;
+        self.absolute_pts += input.pts_duration();
         let mut gb = kaeru::GraphBuilder::new(input)?;
         for s in self.cfg.streams.iter() {
             let (tx, rx) = tc_queue::new();
@@ -210,10 +214,11 @@ impl Queue {
             gb.add_output(output)?;
             prebufs.push(PreBuffer::new(rx, metadata.clone()));
         }
+
         let g = gb.build()?;
         thread::spawn(move || {
             debug!("Starting transcode");
-            match g.run() {
+            match g.run(pts) {
                 Ok(()) => { }
                 Err(e) => { debug!("transcode completed with err: {}", e) }
             }

@@ -111,7 +111,7 @@ pub trait Sink : Write {
 }
 
 impl Graph {
-    pub fn run(mut self) -> Result<()> {
+    pub fn run(mut self, pts_base: i64) -> Result<()> {
         unsafe {
             // Write header
             for o in self.outputs.iter() {
@@ -123,9 +123,9 @@ impl Graph {
                 }
             }
 
-            let mut res = self.execute_tc();
+            let mut res = self.execute_tc(pts_base);
             if res.is_ok() {
-                res = self.try_flush();
+                res = self.try_flush(pts_base);
                 for o in self.outputs.iter() {
                     (o.output.body_signal)(o.output._opaque.ptr);
                     sys::av_write_trailer(o.output.ctx);
@@ -135,7 +135,7 @@ impl Graph {
                     (o.output.body_signal)(o.output._opaque.ptr);
                 }
 
-                if self.try_flush().is_err() {
+                if self.try_flush(pts_base).is_err() {
                     // TODO: ?
                 }
 
@@ -147,9 +147,9 @@ impl Graph {
         }
     }
 
-    unsafe fn execute_tc(&mut self) -> Result<()> {
+    unsafe fn execute_tc(&mut self, pts_base: i64) -> Result<()> {
         self.input.input.read_frames(self.in_frame, || {
-            (*self.in_frame).pts = sys::av_frame_get_best_effort_timestamp(self.in_frame);
+            (*self.in_frame).pts = pts_base + (*self.in_frame).best_effort_timestamp;
             let pres = self.process_frame(self.in_frame);
             sys::av_frame_unref(self.in_frame);
             pres
@@ -183,9 +183,9 @@ impl Graph {
         Ok(())
     }
 
-    unsafe fn try_flush(&self) -> Result<()> {
+    unsafe fn try_flush(&self, pts_base: i64) -> Result<()> {
         let mut res = self.input.input.flush_frames(self.in_frame, || {
-            (*self.in_frame).pts = sys::av_frame_get_best_effort_timestamp(self.in_frame);
+            (*self.in_frame).pts = pts_base + (*self.in_frame).best_effort_timestamp;
             let pres = self.process_frame(self.in_frame);
             sys::av_frame_unref(self.in_frame);
             pres
@@ -278,6 +278,8 @@ impl GraphBuilder {
             };
             (*output.codec_ctx).time_base = time_base;
             (*output.stream).time_base = time_base;
+            //Fixes ending
+            (*output.stream).duration = 0;
 
             //Do not copy metadata
             //sys::av_dict_copy(&mut (*output.ctx).metadata, (*self.input.input.ctx).metadata, 0);
@@ -460,6 +462,12 @@ impl Input {
                 stream,
                 _opaque: opaque,
             })
+        }
+    }
+
+    pub fn pts_duration(&self) -> i64 {
+        unsafe {
+            return (*self.stream).duration;
         }
     }
 
@@ -849,7 +857,7 @@ mod tests {
         gb.add_output(o3)?;
         gb.add_output(o4)?;
         gb.add_output(o5)?;
-        gb.build()?.run()
+        gb.build()?.run(0)
     }
 
     #[test]

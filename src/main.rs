@@ -120,7 +120,7 @@ mod tests {
         let mut gb = GraphBuilder::new(i)?;
         gb.add_output(o1)?.add_output(o2)?.add_output(o3)?.add_output(o4)?;
         let g = gb.build()?;
-        let gt = thread::spawn(move || g.run().unwrap());
+        let gt = thread::spawn(move || g.run(0).unwrap());
         gt.join();
         Ok(())
     }
