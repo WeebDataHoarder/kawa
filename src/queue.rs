@@ -200,7 +200,7 @@ impl Queue {
         let input = kaeru::Input::new(BufReader::with_capacity(INPUT_BUF_LEN, s), container)?;
         let metadata = sync::Arc::new(input.metadata());
         let pts = self.absolute_pts;
-        self.absolute_pts += input.pts_duration();
+        self.absolute_pts += input.pts_duration(); //TODO: convert from input pts to output pts using time_base
         let mut gb = kaeru::GraphBuilder::new(input)?;
         for s in self.cfg.streams.iter() {
             let (tx, rx) = tc_queue::new();
@@ -210,7 +210,7 @@ impl Queue {
                 Container::AAC => "adts",
                 Container::FLAC => "flac",
             };
-            let output = kaeru::Output::new(tx, ct, s.codec, s.bitrate)?;
+            let output = kaeru::Output::new(tx, ct, s.codec, s.bitrate, pts)?;
             gb.add_output(output)?;
             prebufs.push(PreBuffer::new(rx, metadata.clone()));
         }

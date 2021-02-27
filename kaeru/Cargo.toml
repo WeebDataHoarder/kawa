@@ -3,6 +3,10 @@ name = "kaeru"
 version = "0.1.1"
 authors = ["Luminarys <postmaster@gensok.io>"]
 
+[lib]
+name = "kaeru"
+path = "src/lib.rs"
+
 [dependencies.libc]
 version = "0.2"
 

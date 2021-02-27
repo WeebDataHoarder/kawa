@@ -8,7 +8,7 @@ pub use sys::AVCodecID;
 use std::ffi::{CString, CStr};
 use std::io::{self, Read, Write};
 use std::{slice, ptr, mem, time};
-use libc::{c_char, c_int, c_void, uint8_t};
+use libc::{c_char, c_int, c_void};
 
 error_chain! {
     errors {
@@ -278,7 +278,7 @@ impl GraphBuilder {
             };
             (*output.codec_ctx).time_base = time_base;
             (*output.stream).time_base = time_base;
-            //Fixes ending
+            //Fixes some ending streams
             (*output.stream).duration = 0;
 
             //Do not copy metadata
@@ -507,27 +507,27 @@ impl Input {
     }
 
     unsafe fn read_frames<F: FnMut() -> Result<()>>(&self, frame: *mut sys::AVFrame, mut f: F) -> Result<()> {
-        let mut packet: sys::AVPacket = mem::uninitialized();
-        packet.data = ptr::null_mut();
-        packet.size = 0;
+        let mut packet = mem::MaybeUninit::<sys::AVPacket>::uninit();
+        (*packet.as_mut_ptr()).data = ptr::null_mut();
+        (*packet.as_mut_ptr()).size = 0;
 
         'outer: loop {
             loop {
-                match sys::av_read_frame(self.ctx, &mut packet) {
+                match sys::av_read_frame(self.ctx, packet.as_mut_ptr()) {
                     0 => { }
                     e if e == sys::AVERROR_EOF => { break 'outer; }
                     e  => { return Err(ErrorKind::FFmpeg("failed to read frame", e).into()); }
                 }
-                let stream_idx = (&packet).stream_index as isize;
+                let stream_idx = packet.assume_init().stream_index as isize;
                 let stream = *(*self.ctx).streams.offset(stream_idx);
                 if stream == self.stream {
                     break;
                 } else {
-                    sys::av_packet_unref(&mut packet);
+                    sys::av_packet_unref(packet.as_mut_ptr());
                 }
             }
 
-            match { let r = sys::avcodec_send_packet(self.codec_ctx, &packet); sys::av_packet_unref(&mut packet); r} {
+            match { let r = sys::avcodec_send_packet(self.codec_ctx, packet.as_ptr()); sys::av_packet_unref(packet.as_mut_ptr()); r} {
                 0 => { }
                 e if e == sys::AVERROR_EOF => { break 'outer; }
                 e  => { return Err(ErrorKind::FFmpeg("failed to decode packet", e).into()); }
@@ -552,11 +552,13 @@ impl Input {
             return Ok(());
         }
 
-        let mut packet: sys::AVPacket = mem::uninitialized();
-        packet.data = ptr::null_mut();
-        packet.size = 0;
+        //TODO: check EOF packet usage
 
-        let mut res = match sys::avcodec_send_packet(self.codec_ctx, &packet) {
+        let mut packet = mem::MaybeUninit::<sys::AVPacket>::uninit();
+        (*packet.as_mut_ptr()).data = ptr::null_mut();
+        (*packet.as_mut_ptr()).size = 0;
+
+        let mut res = match sys::avcodec_send_packet(self.codec_ctx, packet.as_ptr()) {
             0 => Ok(()),
             e => Err(ErrorKind::FFmpeg("failed to handle EOF packet", e).into()),
         };
@@ -594,10 +596,10 @@ impl Output {
             fn flush(&mut self) -> io::Result<()> { self.0.flush() }
         }
         impl<T: Write> Sink for SW<T> { };
-        Output::new(SW(t), container, codec_id, bit_rate)
+        Output::new(SW(t), container, codec_id, bit_rate, 0)
     }
 
-    pub fn new<T: Sink + Send + Sized>(t: T, container: &str, codec_id: sys::AVCodecID::Type, bit_rate: Option<i64>) -> Result<Output> {
+    pub fn new<T: Sink + Send + Sized>(t: T, container: &str, codec_id: sys::AVCodecID::Type, bit_rate: Option<i64>, base_pts: i64) -> Result<Output> {
         unsafe {
             let buffer = sys::av_malloc(4096) as *mut u8;
             ck_null!(buffer);
@@ -628,6 +630,17 @@ impl Output {
             if container == "ogg" {
                 // Set page size to a small duration(0.05s), to minimize skip loss
                 sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("page_duration\0"), 50000, 0);
+                // Set serial offset to allow better chaining
+                sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("serial_offset\0"), base_pts, 0);
+            } else if container == "mp3" {
+                // Do not output metadata
+                sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("write_xing\0"), 0, 0);
+                sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("id3v2_version\0"), 0, 0);
+            } else if container == "flac" {
+                // Do not output file header on consecutive streams
+                /*if base_pts > 0 {
+                    sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("write_header\0"), 0, 0);
+                }*/
             }
             let stream = sys::avformat_new_stream(ctx, codec);
             ck_null!(stream);
@@ -645,46 +658,48 @@ impl Output {
     }
 
     unsafe fn write_frame(&self, frame: *mut sys::AVFrame) -> Result<()> {
-        let mut out_pkt: sys::AVPacket = mem::uninitialized();
-        out_pkt.data = ptr::null_mut();
-        out_pkt.size = 0;
-        sys::av_init_packet(&mut out_pkt);
+        let mut out_pkt = mem::MaybeUninit::<sys::AVPacket>::uninit();
+        (*out_pkt.as_mut_ptr()).data = ptr::null_mut();
+        (*out_pkt.as_mut_ptr()).size = 0;
+
+        sys::av_init_packet(out_pkt.as_mut_ptr());
         match sys::avcodec_send_frame(self.codec_ctx, frame) {
             0 => { }
             e => return Err(ErrorKind::FFmpeg("failed to send frame to encoder", e).into()),
         }
         loop {
-            match sys::avcodec_receive_packet(self.codec_ctx, &mut out_pkt) {
+            match sys::avcodec_receive_packet(self.codec_ctx, out_pkt.as_mut_ptr()) {
                 0 => { }
                 e if e == sys::AVERROR(libc::EAGAIN) => { break }
                 e if e == sys::AVERROR_EOF => { break }
                 e => return Err(ErrorKind::FFmpeg("failed to get packet from encoder", e).into()),
             }
 
-            sys::av_packet_rescale_ts(&mut out_pkt, (*self.codec_ctx).time_base, (*self.stream).time_base);
-            out_pkt.stream_index = 0;
+            sys::av_packet_rescale_ts(out_pkt.as_mut_ptr(), (*self.codec_ctx).time_base, (*self.stream).time_base);
+            (*out_pkt.as_mut_ptr()).stream_index = 0;
             let s = sys::av_q2d((*self.stream).time_base);
-            let pts = s * out_pkt.pts as f64;
+            let pts = s * out_pkt.assume_init().pts as f64;
 
-            match { let r = sys::av_write_frame(self.ctx, &mut out_pkt); sys::av_packet_unref(&mut out_pkt); r } {
+            match { let r = sys::av_write_frame(self.ctx, out_pkt.as_mut_ptr()); sys::av_packet_unref(out_pkt.as_mut_ptr()); r } {
                 0 => { }
                 e => return Err(ErrorKind::FFmpeg("failed to write packet", e).into()),
             }
             sys::avio_flush((*self.ctx).pb);
             (self.packet_signal)(self._opaque.ptr, pts);
-            sys::av_packet_unref(&mut out_pkt);
+            sys::av_packet_unref(out_pkt.as_mut_ptr());
         }
         Ok(())
     }
 
     unsafe fn flush_queue(&self) {
-        let mut out_pkt: sys::AVPacket = mem::uninitialized();
-        out_pkt.data = ptr::null_mut();
-        out_pkt.size = 0;
-        sys::av_init_packet(&mut out_pkt);
+        let mut out_pkt = mem::MaybeUninit::<sys::AVPacket>::uninit();
+        (*out_pkt.as_mut_ptr()).data = ptr::null_mut();
+        (*out_pkt.as_mut_ptr()).size = 0;
+
+        sys::av_init_packet(out_pkt.as_mut_ptr());
         sys::avcodec_send_frame(self.codec_ctx, ptr::null());
         loop {
-            match sys::avcodec_receive_packet(self.codec_ctx, &mut out_pkt) {
+            match sys::avcodec_receive_packet(self.codec_ctx, out_pkt.as_mut_ptr()) {
                 0 => { }
                 _ => break
             }
@@ -704,7 +719,7 @@ impl Drop for Output {
     }
 }
 
-unsafe extern fn read_cb<T: Read + Sized>(opaque: *mut c_void, buf: *mut uint8_t, len: c_int) -> c_int {
+unsafe extern fn read_cb<T: Read + Sized>(opaque: *mut c_void, buf: *mut u8, len: c_int) -> c_int {
     let reader = &mut *(opaque as *mut T);
     let s = slice::from_raw_parts_mut(buf, len as usize);
     match reader.read(s) {
@@ -719,7 +734,7 @@ unsafe extern fn read_cb<T: Read + Sized>(opaque: *mut c_void, buf: *mut uint8_t
     }
 }
 
-unsafe extern fn write_cb<T: Sink + Sized>(opaque: *mut c_void, buf: *mut uint8_t, len: c_int) -> c_int {
+unsafe extern fn write_cb<T: Sink + Sized>(opaque: *mut c_void, buf: *mut u8, len: c_int) -> c_int {
     let writer = &mut *(opaque as *mut T);
     let s = slice::from_raw_parts(buf, len as usize);
     match writer.write(s) {

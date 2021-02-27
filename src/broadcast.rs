@@ -8,16 +8,13 @@ use url::Url;
 
 use api;
 use config::{Config, StreamConfig, Container};
+use kaeru::AVCodecID::AV_CODEC_ID_OPUS;
 
 const CLIENT_BUFFER_LEN: usize = 16384;
 // Number of frames to buffer by
 const BACK_BUFFER_LEN: usize = 256;
 // Seconds of inactivity until client timeout
 const CLIENT_TIMEOUT: u64 = 10;
-
-const CHUNK_SIZE: usize = 1024;
-static CHUNK_HEADER: &'static str = "400\r\n";
-static CHUNK_FOOTER: &'static str = "\r\n";
 
 pub struct Broadcaster {
     poll: amy::Poller,
@@ -63,6 +60,7 @@ struct Client {
 enum Agent {
     MPV,
     MPD,
+    Chunked,
     Other,
 }
 
@@ -80,9 +78,9 @@ struct Stream {
 }
 
 enum Chunker {
-    Header(&'static str),
+    Header(String),
     Body(usize),
-    Footer(&'static str),
+    Footer(String),
 }
 
 // Write
@@ -235,12 +233,12 @@ impl Broadcaster {
                 let inc = self.incoming.remove(&id).unwrap();
                 for (mid, stream) in self.streams.iter().enumerate() {
                     if mount.ends_with(&stream.config.mount) {
-                        debug!("Adding a client to stream {}", stream.config.mount);
+                        debug!("Adding a client to stream {}, id {}", stream.config.mount, id);
                         // Swap to write only mode
                         self.reg.reregister(id, &inc.conn, amy::Event::Write).unwrap();
                         let mut client = Client::new(inc.conn, agent);
                         // Send header, and buffered data
-                        if client.write_resp(&self.name, &stream.config)
+                        let res = client.write_resp(&self.name, &stream.config)
                             .and_then(|_| client.send_data(&stream.header))
                             .and_then(|_| {
                                 // TODO: Consider edge case where the header is double sent
@@ -248,8 +246,9 @@ impl Broadcaster {
                                     client.send_data(buf)?
                                 }
                                 Ok(())
-                            })
-                            .is_ok()
+                            });
+
+                        if res.is_ok()
                         {
                             self.client_mounts[mid].insert(id);
                             self.clients.insert(id, client);
@@ -282,6 +281,7 @@ impl Broadcaster {
         let client = self.clients.remove(id).unwrap();
         self.reg.deregister(&client.conn).unwrap();
         self.listeners.lock().unwrap().remove(id);
+        debug!("Removing a client from stream, id {}", id);
         // Remove from client_mounts map too
         for m in self.client_mounts.iter_mut() {
             m.remove(id);
@@ -379,6 +379,20 @@ impl Incoming {
     }
 }
 
+
+
+macro_rules! write_agent_match {
+        ($self:ident, $buf:ident) => {
+            match $self.agent {
+                Agent::Chunked => $self.chunker.write(&mut $self.conn, $buf),
+                _ => match $self.conn.write($buf) {
+                    Ok(a) => Ok(Some(a)),
+                    Err(e) => Err(e)
+                }
+            }
+        };
+    }
+
 impl Client {
     fn new(conn: TcpStream, agent: Agent) -> Client {
         Client {
@@ -391,39 +405,52 @@ impl Client {
     }
 
     fn write_resp(&mut self, name: &str, config: &StreamConfig) -> Result<(), ()> {
-        let lines = vec![
+        let mut lines = vec![
             format!("HTTP/1.1 200 OK"),
-            format!("Server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-            format!("Content-Type: {}", if let Container::MP3 = config.container {
+            format!("server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            format!("content-type: {}", if let Container::MP3 = config.container {
                 "audio/mpeg;codecs=mp3"
             } else if let Container::FLAC = config.container {
                 "audio/flac"
             } else if let Container::AAC = config.container {
                 "audio/aac"
+            } else if let Container::Ogg = config.container {
+                if config.codec == AV_CODEC_ID_OPUS {
+                    "audio/ogg;codecs=opus"
+                } else {
+                    "audio/ogg"
+                }
             } else {
                 "audio/ogg"
             }),
-            format!("Transfer-Encoding: chunked"),
-            format!("Connection: keep-alive"),
-            format!("Cache-Control: no-store, max-age=0, no-transform"),
-            format!("Accept-Ranges: none"),
+            format!("connection: close"),
+            format!("cache-control: no-store, max-age=0, no-transform"),
+            format!("accept-ranges: none"),
+            //Fixes chrome opening and closing streams continuously with Range requests
+            format!("x-content-type-options: nosniff"),
             format!("x-audiocast-name: {}", name),
             match config.bitrate {
-		Some(bitrate) => format!("x-audiocast-bitrate: {}", bitrate),
-		None => format!("x-audiocast-bitrate: 0"),
-	    },
+                Some(bitrate) => format!("x-audiocast-bitrate: {}", bitrate),
+                None => format!("x-audiocast-bitrate: 0"),
+            },
             format!("icy-name: {}", name),
             match config.bitrate {
                 Some(bitrate) => format!("icy-br: {}", bitrate),
                 None => format!("icy-br: 0"),
             },
         ];
+
+        if self.agent == Agent::Chunked {
+            lines.push(format!("transfer-encoding: chunked"));
+        }
+
         let data = lines.join("\r\n") + "\r\n\r\n";
-        match self.conn.write(data.as_bytes()) {
-            Ok(0) => Err(()),
-            Ok(a) if a == data.as_bytes().len() => { Ok(() )}
-            Ok(_) => unreachable!(),
-            Err(_) => Err(())
+        match self.conn.write_all(data.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(ref e) => {
+                debug!("Failed to write_resp: {}", e);
+                Err(())
+            },
         }
     }
 
@@ -445,8 +472,11 @@ impl Client {
             Err(()) => return Err(()),
         }
 
-        match self.chunker.write(&mut self.conn, data) {
-            Ok(Some(0)) => Err(()),
+        match write_agent_match!(self, data) {
+            Ok(Some(0)) => {
+                debug!("Failed to send_data to client: 0 bytes written");
+                Err(())
+            },
             // Complete write, do nothing
             Ok(Some(a)) if a == data.len() => Ok(()),
             // Incomplete write, append to buf
@@ -471,7 +501,10 @@ impl Client {
                 }
                 Ok(())
             }
-            Err(_) => Err(()),
+            Err(ref e) => {
+                debug!("Failed to send_data: {}", e);
+                Err(())
+            },
         }
     }
 
@@ -500,47 +533,63 @@ impl Client {
 
     fn write_buffer(&mut self) -> WR {
         let (head, tail) = self.buffer.as_slices();
-        match self.chunker.write(&mut self.conn, head) {
-            Ok(Some(0)) => WR::Err,
+
+        match write_agent_match!(self, head) {
+            Ok(Some(0)) => {
+                debug!("Failed to write_buffer to client: 0 bytes written");
+                WR::Err
+            },
             Ok(Some(a)) if a == head.len() => {
-                match self.chunker.write(&mut self.conn, tail) {
-                    Ok(Some(0)) => WR::Err,
+                match write_agent_match!(self, tail) {
+                    Ok(Some(0)) => {
+                        debug!("Failed to write_buffer to client: 0 bytes written");
+                        WR::Err
+                    },
                     Ok(Some(i)) if i == tail.len() => WR::Ok,
                     Ok(Some(i)) => WR::Inc(i + a),
                     Ok(None) => WR::Inc(a),
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => WR::Inc(a),
-                    Err(_) => WR::Err,
+                    Err(ref e) => {
+                        debug!("Failed to write_buffer: {}", e);
+                        WR::Err
+                    },
                 }
             },
             Ok(Some(a)) => WR::Inc(a),
             Ok(None) => WR::Inc(0),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => WR::Blocked,
-            Err(_) => WR::Err,
+            Err(ref e) => {
+                debug!("Failed to write_buffer: {}", e);
+                WR::Err
+            }
         }
     }
 }
 
+
+const CHUNK_SIZE: usize = 4096;
+
 impl Chunker {
     fn new() -> Chunker {
-        Chunker::Header(CHUNK_HEADER)
+        Chunker::Header(format!("{:X}\r\n", CHUNK_SIZE))
     }
 
     fn write<T: io::Write>(&mut self, conn: &mut T, data: &[u8]) -> io::Result<Option<usize>> {
-        match *self {
+        match &*self {
             Chunker::Header(s) => {
                 let amnt = conn.write(s.as_bytes())?;
                 if amnt == s.len() {
                     *self = Chunker::Body(0);
                     self.write(conn, data)
                 } else {
-                    *self = Chunker::Header(&s[amnt..]);
+                    *self = Chunker::Header(s[amnt..].to_string());
                     Ok(None)
                 }
             }
             Chunker::Body(i) => {
                 let amnt = conn.write(&data[..cmp::min(CHUNK_SIZE - i, data.len())])?;
                 if i + amnt == CHUNK_SIZE {
-                    *self = Chunker::Footer(CHUNK_FOOTER);
+                    *self = Chunker::Footer("\r\n".to_string());
                     // Continue writing, and add on the current amount
                     // written to the result.
                     // We ignore errors here for now, since they should
@@ -552,7 +601,10 @@ impl Chunker {
                                 None => amnt
                             }))
                         }
-                        Err(_) => Ok(Some(amnt))
+                        Err(ref e) => {
+                            debug!("Failed to Chunker::Body to client partial write due to error: {}, written {}", e, amnt);
+                            Ok(Some(amnt))
+                        }
                     }
                 } else {
                     *self = Chunker::Body(i + amnt);
@@ -562,25 +614,13 @@ impl Chunker {
             Chunker::Footer(s) => {
                 let amnt = conn.write(s.as_bytes())?;
                 if amnt == s.len() {
-                    *self = Chunker::Header(CHUNK_HEADER);
+                    *self = Chunker::Header(format!("{:X}\r\n", CHUNK_SIZE));
                     self.write(conn, data)
                 } else {
-                    *self = Chunker::Footer(&s[amnt..]);
+                    *self = Chunker::Footer(s[amnt..].to_string());
                     Ok(None)
                 }
             }
         }
     }
-}
-
-#[test]
-fn test_footer_transition() {
-    use std::io::Cursor;
-    let mut c = Chunker::Footer("hello world");
-    let mut d = [0u8; 5];
-    let mut v = Cursor::new(&mut d[..]);
-    c.write(&mut v, &[]).unwrap();
-    assert_eq!(v.into_inner(), b"hello");
-    if let Chunker::Footer(" world") = c {
-    } else { unreachable!() };
 }
