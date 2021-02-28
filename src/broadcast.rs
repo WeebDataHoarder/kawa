@@ -60,7 +60,7 @@ struct Client {
 enum Agent {
     MPV,
     MPD,
-    Chunked,
+    NotChunked,
     Other,
 }
 
@@ -384,11 +384,11 @@ impl Incoming {
 macro_rules! write_agent_match {
         ($self:ident, $buf:ident) => {
             match $self.agent {
-                Agent::Chunked => $self.chunker.write(&mut $self.conn, $buf),
-                _ => match $self.conn.write($buf) {
+                Agent::NotChunked => match $self.conn.write($buf) {
                     Ok(a) => Ok(Some(a)),
                     Err(e) => Err(e)
-                }
+                },
+                _ => $self.chunker.write(&mut $self.conn, $buf)
             }
         };
     }
@@ -440,7 +440,7 @@ impl Client {
             },
         ];
 
-        if self.agent == Agent::Chunked {
+        if self.agent != Agent::NotChunked {
             lines.push(format!("transfer-encoding: chunked"));
         }
 
