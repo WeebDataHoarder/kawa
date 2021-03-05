@@ -6,8 +6,8 @@ use std::io::{self, Read, Write};
 use {amy, httparse};
 use url::Url;
 
-use api;
-use config::{Config, StreamConfig, Container};
+use crate::api;
+use crate::config::{Config, StreamConfig, Container};
 use kaeru::AVCodecID::AV_CODEC_ID_OPUS;
 
 const CLIENT_BUFFER_LEN: usize = 16384;

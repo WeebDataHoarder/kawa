@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use kaeru::Metadata;
-use tc_queue;
+use crate::tc_queue;
 
 pub struct PreBuffer {
     pub buffer: tc_queue::QR,

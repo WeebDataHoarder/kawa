@@ -2,7 +2,7 @@ use std::sync::{atomic, mpsc, Arc};
 use std::{mem, io, time};
 
 use kaeru::Sink;
-use broadcast::BufferData;
+use crate::broadcast::BufferData;
 
 pub struct QW {
     queue: mpsc::SyncSender<BufferData>,

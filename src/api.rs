@@ -6,8 +6,8 @@ use std::path::Path;
 use serde_json as serde;
 use rouille;
 
-use queue::{Queue, NewQueueEntry};
-use config::ApiConfig;
+use crate::queue::{Queue, NewQueueEntry};
+use crate::config::ApiConfig;
 
 pub type Listeners = Arc<Mutex<HashMap<usize, Listener>>>;
 type SQueue = Arc<Mutex<Queue>>;

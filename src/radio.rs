@@ -5,12 +5,12 @@ use std::{thread, time};
 
 use reqwest;
 
-use queue::{Queue, QueueEntry};
-use api::{ApiMessage, QueuePos};
-use config::Config;
-use prebuffer::PreBuffer;
-use broadcast::{Buffer, BufferData};
-use tc_queue::BufferRes;
+use crate::queue::{Queue, QueueEntry};
+use crate::api::{ApiMessage, QueuePos};
+use crate::config::Config;
+use crate::prebuffer::PreBuffer;
+use crate::broadcast::{Buffer, BufferData};
+use crate::tc_queue::BufferRes;
 use amy;
 
 struct RadioConn {

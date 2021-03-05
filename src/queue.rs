@@ -1,13 +1,13 @@
 use std::{mem, fs, thread, sync};
 use std::io::{self, Read, BufReader};
 use std::collections::VecDeque;
-use config::{Config, Container};
+use crate::config::{Config, Container};
 use reqwest;
-use prebuffer::PreBuffer;
+use crate::prebuffer::PreBuffer;
 use serde_json as serde;
 use serde_json::Map;
 use serde_json::Value as JSON;
-use tc_queue;
+use crate::tc_queue;
 use kaeru;
 
 // 256 KiB nuffer
