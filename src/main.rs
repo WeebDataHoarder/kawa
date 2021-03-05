@@ -18,6 +18,7 @@ extern crate httparse;
 extern crate url;
 
 extern crate kaeru;
+extern crate sha1;
 
 mod radio;
 mod config;

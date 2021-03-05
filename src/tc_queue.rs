@@ -65,6 +65,11 @@ impl io::Write for QW {
 }
 
 impl Sink for QW {
+    fn started_signal_written(&mut self) {
+        if self.queue.send(BufferData::InlineData(b"\x01".to_vec())).is_err() {
+            self.done.store(true, atomic::Ordering::Release);
+        }
+    }
     fn header_written(&mut self) {
         self.writing_header = false;
         let nb = io::Cursor::new(Vec::with_capacity(1024));

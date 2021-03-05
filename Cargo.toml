@@ -2,6 +2,7 @@
 name = "kawa"
 version = "0.2.0"
 authors = ["Luminarys <postmaster@gensok.io>", "ParadoxSpiral <ParadoxSpiral@riseup.net>", "WeebDataHoarder <57538841+WeebDataHoarder@users.noreply.github.com>"]
+edition = "2018"
 
 [[bin]]
 name = "kawa"
@@ -23,6 +24,9 @@ reqwest = { version = "0.11", features = ["blocking", "json"] }
 rouille = "3.0"
 httparse = "1.3"
 url = "1.7"
+sha-1 = "0.9"
+base64 = "0.13"
+byteorder = "1.4"
 
 [dependencies.amy]
 version = "0.10.0"

@@ -110,6 +110,9 @@ pub fn play(buffer_rec: Receiver<PreBuffer>, mid: usize, btx: amy::Sender<Buffer
             BufferRes::Data(b @ BufferData::Trailer(_) ) => {
                 btx.send(Buffer::new(mid, b)).unwrap();
             }
+            BufferRes::Data(b @ BufferData::InlineData(_) ) => {
+                btx.send(Buffer::new(mid, b)).unwrap();
+            }
             BufferRes::Timeout => {
                 if syncer.should_skip() {
                     debug!("Buffer recv timeout, skipping!");

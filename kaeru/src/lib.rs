@@ -80,6 +80,7 @@ pub struct Output {
     codec_ctx: *mut sys::AVCodecContext,
     stream: *mut sys::AVStream,
     _opaque: Opaque,
+    started_signal: fn(*mut c_void),
     header_signal: fn(*mut c_void),
     packet_signal: fn(*mut c_void, f64),
     body_signal: fn(*mut c_void),
@@ -105,16 +106,18 @@ struct GraphP {
 }
 
 pub trait Sink : Write {
+    fn started_signal_written(&mut self) { }
     fn header_written(&mut self) { }
     fn packet_written(&mut self, _: f64) { }
     fn body_written(&mut self) { }
 }
 
 impl Graph {
-    pub fn run(mut self, pts_base: i64) -> Result<()> {
+    pub fn run(mut self) -> Result<()> {
         unsafe {
             // Write header
             for o in self.outputs.iter() {
+                (o.output.started_signal)(o.output._opaque.ptr);
                 match sys::avformat_write_header(o.output.ctx, ptr::null_mut()) {
                     0 => {
                         (o.output.header_signal)(o.output._opaque.ptr);
@@ -123,9 +126,9 @@ impl Graph {
                 }
             }
 
-            let mut res = self.execute_tc(pts_base);
+            let mut res = self.execute_tc();
             if res.is_ok() {
-                res = self.try_flush(pts_base);
+                res = self.try_flush();
                 for o in self.outputs.iter() {
                     (o.output.body_signal)(o.output._opaque.ptr);
                     sys::av_write_trailer(o.output.ctx);
@@ -135,7 +138,7 @@ impl Graph {
                     (o.output.body_signal)(o.output._opaque.ptr);
                 }
 
-                if self.try_flush(pts_base).is_err() {
+                if self.try_flush().is_err() {
                     // TODO: ?
                 }
 
@@ -147,9 +150,9 @@ impl Graph {
         }
     }
 
-    unsafe fn execute_tc(&mut self, pts_base: i64) -> Result<()> {
+    unsafe fn execute_tc(&mut self) -> Result<()> {
         self.input.input.read_frames(self.in_frame, || {
-            (*self.in_frame).pts = pts_base + (*self.in_frame).best_effort_timestamp;
+            (*self.in_frame).pts = (*self.in_frame).best_effort_timestamp;
             let pres = self.process_frame(self.in_frame);
             sys::av_frame_unref(self.in_frame);
             pres
@@ -183,9 +186,9 @@ impl Graph {
         Ok(())
     }
 
-    unsafe fn try_flush(&self, pts_base: i64) -> Result<()> {
+    unsafe fn try_flush(&self) -> Result<()> {
         let mut res = self.input.input.flush_frames(self.in_frame, || {
-            (*self.in_frame).pts = pts_base + (*self.in_frame).best_effort_timestamp;
+            (*self.in_frame).pts = (*self.in_frame).best_effort_timestamp;
             let pres = self.process_frame(self.in_frame);
             sys::av_frame_unref(self.in_frame);
             pres
@@ -596,10 +599,10 @@ impl Output {
             fn flush(&mut self) -> io::Result<()> { self.0.flush() }
         }
         impl<T: Write> Sink for SW<T> { };
-        Output::new(SW(t), container, codec_id, bit_rate, 0)
+        Output::new(SW(t), container, codec_id, bit_rate)
     }
 
-    pub fn new<T: Sink + Send + Sized>(t: T, container: &str, codec_id: sys::AVCodecID::Type, bit_rate: Option<i64>, base_pts: i64) -> Result<Output> {
+    pub fn new<T: Sink + Send + Sized>(t: T, container: &str, codec_id: sys::AVCodecID::Type, bit_rate: Option<i64>) -> Result<Output> {
         unsafe {
             let buffer = sys::av_malloc(4096) as *mut u8;
             ck_null!(buffer);
@@ -631,7 +634,7 @@ impl Output {
                 // Set page size to a small duration(0.05s), to minimize skip loss
                 sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("page_duration\0"), 50000, 0);
                 // Set serial offset to allow better chaining
-                sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("serial_offset\0"), base_pts, 0);
+                //sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("serial_offset\0"), base_pts, 0);
             } else if container == "mp3" {
                 // Do not output metadata
                 sys::av_opt_set_int((*ctx).priv_data as *mut c_void, str_conv!("write_xing\0"), 0, 0);
@@ -650,6 +653,7 @@ impl Output {
                 _opaque: opaque,
                 codec_ctx,
                 stream,
+                started_signal: sink_started_signal_written::<T>,
                 header_signal: sink_header_written::<T>,
                 packet_signal: sink_packet_written::<T>,
                 body_signal: sink_body_written::<T>,
@@ -746,6 +750,13 @@ unsafe extern fn write_cb<T: Sink + Sized>(opaque: *mut c_void, buf: *mut u8, le
                 sys::AVERROR_EXIT
             }
         }
+    }
+}
+
+fn sink_started_signal_written<T: Sink + Sized>(opaque: *mut c_void) {
+    unsafe {
+        let s = &mut *(opaque as *mut T);
+        s.started_signal_written();
     }
 }
 
@@ -872,7 +883,7 @@ mod tests {
         gb.add_output(o3)?;
         gb.add_output(o4)?;
         gb.add_output(o5)?;
-        gb.build()?.run(0)
+        gb.build()?.run()
     }
 
     #[test]

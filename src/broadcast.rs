@@ -9,6 +9,7 @@ use url::Url;
 use crate::api;
 use crate::config::{Config, StreamConfig, Container};
 use kaeru::AVCodecID::AV_CODEC_ID_OPUS;
+use sha1::{Digest, Sha1};
 
 const CLIENT_BUFFER_LEN: usize = 16384;
 // Number of frames to buffer by
@@ -46,6 +47,7 @@ pub enum BufferData {
     Header(Vec<u8>),
     Frame { data: Vec<u8>, pts: f64 },
     Trailer(Vec<u8>),
+    InlineData(Vec<u8>),
 }
 
 struct Client {
@@ -53,7 +55,9 @@ struct Client {
     buffer: VecDeque<u8>,
     last_action: time::Instant,
     agent: Agent,
-    chunker: Chunker,
+    options: HashMap<String, String>,
+    chunked_encoder: Chunker,
+    websocket_encoder: WebSocketChunker,
 }
 
 #[derive(PartialEq)]
@@ -61,6 +65,7 @@ enum Agent {
     MPV,
     MPD,
     NotChunked,
+    WebSocket,
     Other,
 }
 
@@ -73,14 +78,20 @@ struct Incoming {
 
 struct Stream {
     config: StreamConfig,
-    header: Vec<u8>,
-    buffer: VecDeque<Vec<u8>>,
+    inline: BufferData,
+    header: BufferData,
+    buffer: VecDeque<BufferData>,
 }
 
 enum Chunker {
     Header(String),
     Body(usize),
     Footer(String),
+}
+
+enum WebSocketChunker {
+    Header(Vec<u8>),
+    Body(usize)
 }
 
 // Write
@@ -108,7 +119,7 @@ impl Broadcaster {
         let (tx, rx) = reg.channel()?;
         let mut streams = Vec::new();
         for config in cfg.streams.iter().cloned() {
-            streams.push(Stream { config, header: Vec::new(), buffer: VecDeque::with_capacity(BACK_BUFFER_LEN) })
+            streams.push(Stream { config, inline: BufferData::InlineData(b"\x01".to_vec()), header: BufferData::Header(b"".to_vec()), buffer: VecDeque::with_capacity(BACK_BUFFER_LEN) })
         }
 
         Ok((Broadcaster {
@@ -192,8 +203,8 @@ impl Broadcaster {
             for id in self.client_mounts[buf.mount].clone() {
                 if {
                     let client = self.clients.get_mut(&id).unwrap();
-                    if buf.data.is_data() || client.agent == Agent::MPD {
-                        client.send_data(buf.data.frame())
+                    if buf.data.is_data() || client.agent == Agent::MPD || client.agent == Agent::WebSocket {
+                        client.send_data(&buf.data)
                     } else {
                         Ok(())
                     }
@@ -201,25 +212,25 @@ impl Broadcaster {
                     self.remove_client(&id);
                 }
             }
+            if buf.data.is_header() {
+                self.streams[buf.mount].header = buf.data.clone();
+            }
+            if buf.data.is_inline() {
+                self.streams[buf.mount].inline = buf.data.clone();
+            }
             {
                 let ref mut sb = self.streams[buf.mount].buffer;
-                sb.push_back(buf.data.frame().to_vec());
+                sb.push_back(buf.data);
                 while sb.len() > BACK_BUFFER_LEN {
                     sb.pop_front();
                 }
-            }
-            match buf.data {
-                BufferData::Header(h) => {
-                    self.streams[buf.mount].header = h;
-                }
-                _ => { }
             }
         }
     }
 
     fn process_incoming(&mut self, id: usize) {
         match self.incoming.get_mut(&id).unwrap().process() {
-            Ok(Some((path, agent, headers))) => {
+            Ok(Some((path, agent, headers, options))) => {
                 // Need this
                 let ub = Url::parse("http://localhost/").unwrap();
                 let url = if let Ok(u) = ub.join(&path) {
@@ -236,9 +247,15 @@ impl Broadcaster {
                         debug!("Adding a client to stream {}, id {}", stream.config.mount, id);
                         // Swap to write only mode
                         self.reg.reregister(id, &inc.conn, amy::Event::Write).unwrap();
-                        let mut client = Client::new(inc.conn, agent);
+                        let mut client = Client::new(inc.conn, agent, options);
                         // Send header, and buffered data
                         let res = client.write_resp(&self.name, &stream.config)
+                            .and_then(|_| {
+                                if client.agent == Agent::WebSocket {
+                                    client.send_data(&stream.inline)?
+                                }
+                                Ok(())
+                            })
                             .and_then(|_| client.send_data(&stream.header))
                             .and_then(|_| {
                                 // TODO: Consider edge case where the header is double sent
@@ -248,8 +265,7 @@ impl Broadcaster {
                                 Ok(())
                             });
 
-                        if res.is_ok()
-                        {
+                        if res.is_ok() {
                             self.client_mounts[mid].insert(id);
                             self.clients.insert(id, client);
                             self.listeners.lock().unwrap().insert(id, api::Listener {
@@ -307,12 +323,25 @@ impl BufferData {
             _ => false,
         }
     }
+    pub fn is_header(&self) -> bool {
+        match *self {
+            BufferData::Header { .. } => true,
+            _ => false,
+        }
+    }
+    pub fn is_inline(&self) -> bool {
+        match *self {
+            BufferData::InlineData { .. } => true,
+            _ => false,
+        }
+    }
 
     pub fn frame(&self) -> &[u8] {
         match *self {
             BufferData::Header(ref f)
             | BufferData::Frame { data: ref f, .. }
-            | BufferData::Trailer(ref f) => f,
+            | BufferData::Trailer(ref f)
+            | BufferData::InlineData(ref f) => f,
         }
     }
 }
@@ -328,11 +357,12 @@ impl Incoming {
         }
     }
 
-    fn process(&mut self) -> Result<Option<(String, Agent, Vec<api::Header>)>, ()> {
+    fn process(&mut self) -> Result<Option<(String, Agent, Vec<api::Header>, HashMap<String, String>)>, ()> {
         self.last_action = time::Instant::now();
         if self.read().is_ok() {
             let mut headers = [httparse::EMPTY_HEADER; 64];
             let mut req = httparse::Request::new(&mut headers);
+            let mut options = HashMap::new();
             match req.parse(&self.buf[..self.len]) {
                 Ok(httparse::Status::Complete(_)) => {
                     if let Some(p) = req.path {
@@ -344,17 +374,24 @@ impl Incoming {
                                 value: String::from_utf8(h.value.to_vec()).unwrap_or("".to_owned())
                             })
                             .map(|h| {
-                                if h.name == "User-Agent" {
+                                if h.name.to_lowercase() == "user-agent" {
                                     if h.value.starts_with("mpv") {
                                         agent = Agent::MPV;
                                     } else if h.value.starts_with("mpd") || h.value.starts_with("Music Player Daemon") {
                                         agent = Agent::MPD;
                                     }
+                                } else if h.name.to_lowercase() == "upgrade" && h.value == "websocket" {
+                                    agent = Agent::WebSocket;
+                                } else if h.name.to_lowercase() == "sec-websocket-key" {
+                                    let mut hasher = Sha1::new();
+                                    hasher.update(h.value.as_bytes());
+                                    hasher.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11".as_bytes()); //WebSocket UUID defined on spec
+                                    options.insert("websocket:accept".to_string(), base64::encode(hasher.finalize()));
                                 }
                                 h
                             })
                             .collect();
-                        Ok(Some((p.to_owned(), agent, ah)))
+                        Ok(Some((p.to_owned(), agent, ah, options)))
                     } else {
                         Err(())
                     }
@@ -388,59 +425,78 @@ macro_rules! write_agent_match {
                     Ok(a) => Ok(Some(a)),
                     Err(e) => Err(e)
                 },
-                _ => $self.chunker.write(&mut $self.conn, $buf)
+                Agent::WebSocket => $self.websocket_encoder.write(&mut $self.conn, $buf),
+                _ => $self.chunked_encoder.write(&mut $self.conn, $buf)
             }
         };
     }
 
 impl Client {
-    fn new(conn: TcpStream, agent: Agent) -> Client {
+    fn new(conn: TcpStream, agent: Agent, options: HashMap<String, String>) -> Client {
         Client {
             conn,
             buffer: VecDeque::with_capacity(CLIENT_BUFFER_LEN),
             last_action: time::Instant::now(),
-            chunker: Chunker::new(),
+            chunked_encoder: Chunker::new(),
+            websocket_encoder: WebSocketChunker::new(),
             agent,
+            options
         }
     }
 
     fn write_resp(&mut self, name: &str, config: &StreamConfig) -> Result<(), ()> {
-        let mut lines = vec![
-            format!("HTTP/1.1 200 OK"),
-            format!("server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-            format!("content-type: {}", if let Container::MP3 = config.container {
-                "audio/mpeg;codecs=mp3"
-            } else if let Container::FLAC = config.container {
-                "audio/flac"
-            } else if let Container::AAC = config.container {
-                "audio/aac"
-            } else if let Container::Ogg = config.container {
-                if config.codec == AV_CODEC_ID_OPUS {
-                    "audio/ogg;codecs=opus"
-                } else {
-                    "audio/ogg"
-                }
-            } else {
-                "audio/ogg"
-            }),
-            format!("connection: close"),
-            format!("cache-control: no-store, max-age=0, no-transform"),
-            format!("accept-ranges: none"),
-            //Fixes chrome opening and closing streams continuously with Range requests
-            format!("x-content-type-options: nosniff"),
-            format!("x-audiocast-name: {}", name),
-            match config.bitrate {
-                Some(bitrate) => format!("x-audiocast-bitrate: {}", bitrate),
-                None => format!("x-audiocast-bitrate: 0"),
-            },
-            format!("icy-name: {}", name),
-            match config.bitrate {
-                Some(bitrate) => format!("icy-br: {}", bitrate),
-                None => format!("icy-br: 0"),
-            },
-        ];
+        let mut lines =
+            match self.agent {
+                Agent::WebSocket => {
+                    vec![
+                        format!("HTTP/1.1 101 Switching Protocols"),
+                        format!("server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                        format!("Upgrade: websocket"),
+                        format!("Connection: Upgrade"),
+                            format!("Sec-WebSocket-Accept: {}", match self.options.get("websocket:accept") {
+                            Some(s) => s,
+                            None => ""
+                        }),
+                        format!("Sec-WebSocket-Version: 13")
+                    ]
+                },
+                _ => vec![
+                    format!("HTTP/1.1 200 OK"),
+                    format!("server: {}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                    format!("content-type: {}", if let Container::MP3 = config.container {
+                        "audio/mpeg;codecs=mp3"
+                    } else if let Container::FLAC = config.container {
+                        "audio/flac"
+                    } else if let Container::AAC = config.container {
+                        "audio/aac"
+                    } else if let Container::Ogg = config.container {
+                        if config.codec == AV_CODEC_ID_OPUS {
+                            "audio/ogg;codecs=opus"
+                        } else {
+                            "audio/ogg"
+                        }
+                    } else {
+                        "audio/ogg"
+                    }),
+                    format!("connection: close"),
+                    format!("cache-control: no-store, max-age=0, no-transform"),
+                    format!("accept-ranges: none"),
+                    //Fixes chrome opening and closing streams continuously with Range requests
+                    format!("x-content-type-options: nosniff"),
+                    format!("x-audiocast-name: {}", name),
+                    match config.bitrate {
+                        Some(bitrate) => format!("x-audiocast-bitrate: {}", bitrate),
+                        None => format!("x-audiocast-bitrate: 0"),
+                    },
+                    format!("icy-name: {}", name),
+                    match config.bitrate {
+                        Some(bitrate) => format!("icy-br: {}", bitrate),
+                        None => format!("icy-br: 0"),
+                    },
+                ]
+            };
 
-        if self.agent != Agent::NotChunked {
+        if self.agent != Agent::NotChunked && self.agent != Agent::WebSocket {
             lines.push(format!("transfer-encoding: chunked"));
         }
 
@@ -454,10 +510,43 @@ impl Client {
         }
     }
 
-    fn send_data(&mut self, data: &[u8]) -> Result<(), ()> {
-        if data.len() == 0 {
+    fn send_data(&mut self, frame: &BufferData) -> Result<(), ()> {
+        if frame.frame().len() == 0 {
             return Ok(());
         }
+        let vector_data = match self.agent {
+            Agent::WebSocket => {
+                use byteorder::{BigEndian, WriteBytesExt};
+                let mut d = match frame {
+                    BufferData::Header(data) => {
+                        let mut h = vec![1];
+                        h.write_u64::<BigEndian>(data.len() as u64).unwrap();
+                        h
+                    }
+                    BufferData::Frame {data, pts} => {
+                        let mut h = vec![2];
+                        h.write_u64::<BigEndian>((data.len() + core::mem::size_of::<f64>()) as u64).unwrap();
+                        h.write_f64::<BigEndian>(*pts as f64).unwrap();
+                        h
+                    }
+                    BufferData::Trailer(data) => {
+                        let mut h = vec![3];
+                        h.write_u64::<BigEndian>(data.len() as u64).unwrap();
+                        h
+                    }
+
+                    BufferData::InlineData(data) => {
+                        let mut h = vec![255];
+                        h.write_u64::<BigEndian>(data.len() as u64).unwrap();
+                        h
+                    }
+                };
+                d.extend(frame.frame());
+                d
+            }
+            _ => frame.frame().to_vec()
+        };
+        let data = vector_data.as_slice();
 
         // Attempt to flush buffer first
         match self.flush_buffer() {
@@ -619,6 +708,67 @@ impl Chunker {
                 } else {
                     *self = Chunker::Footer(s[amnt..].to_string());
                     Ok(None)
+                }
+            }
+        }
+    }
+}
+
+
+/*
+https://tools.ietf.org/html/rfc6455#page-29
+The length of the "Payload data", in bytes: if 0-125, that is the
+      payload length.  If 126, the following 2 bytes interpreted as a
+      16-bit unsigned integer are the payload length.  If 127, the
+      following 8 bytes interpreted as a 64-bit unsigned integer (the
+      most significant bit MUST be 0) are the payload length.
+ */
+const WEBSOCKET_CHUNK_SIZE: usize = 4096; // 125, 4096
+
+impl WebSocketChunker {
+    fn new() -> WebSocketChunker {
+        WebSocketChunker::Header(match WEBSOCKET_CHUNK_SIZE {
+            125 => b"\x82\x7D".to_vec(),
+            4096 => b"\x82\x7E\x10\x00".to_vec(),
+            _ => { unimplemented!() }
+        })
+    }
+
+    fn write<T: io::Write>(&mut self, conn: &mut T, data: &[u8]) -> io::Result<Option<usize>> {
+        match &*self {
+            WebSocketChunker::Header(s) => {
+                let amnt = conn.write(s.as_ref())?;
+                if amnt == s.len() {
+                    *self = WebSocketChunker::Body(0);
+                    self.write(conn, data)
+                } else {
+                    *self = WebSocketChunker::Header(s[amnt..].to_vec());
+                    Ok(None)
+                }
+            }
+            WebSocketChunker::Body(i) => {
+                let amnt = conn.write(&data[..cmp::min(WEBSOCKET_CHUNK_SIZE - i, data.len())])?;
+                if i + amnt == WEBSOCKET_CHUNK_SIZE {
+                    *self = WebSocketChunker::new();
+                    // Continue writing, and add on the current amount
+                    // written to the result.
+                    // We ignore errors here for now, since they should
+                    // be reported later anyways. TODO: think more about it
+                    match self.write(conn, &data[amnt..]) {
+                        Ok(r) => {
+                            Ok(Some(match r {
+                                Some(a) => a + amnt,
+                                None => amnt
+                            }))
+                        }
+                        Err(ref e) => {
+                            debug!("Failed to WebSocketChunker::Body to client partial write due to error: {}, written {}", e, amnt);
+                            Ok(Some(amnt))
+                        }
+                    }
+                } else {
+                    *self = WebSocketChunker::Body(i + amnt);
+                    Ok(Some(amnt))
                 }
             }
         }
