@@ -360,7 +360,7 @@ impl Incoming {
     fn process(&mut self) -> Result<Option<(String, Agent, Vec<api::Header>, HashMap<String, String>)>, ()> {
         self.last_action = time::Instant::now();
         if self.read().is_ok() {
-            let mut headers = [httparse::EMPTY_HEADER; 64];
+            let mut headers = [httparse::EMPTY_HEADER; 1024];
             let mut req = httparse::Request::new(&mut headers);
             let mut options = HashMap::new();
             match req.parse(&self.buf[..self.len]) {
