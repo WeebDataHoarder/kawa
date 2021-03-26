@@ -598,7 +598,7 @@ impl Output {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
             fn flush(&mut self) -> io::Result<()> { self.0.flush() }
         }
-        impl<T: Write> Sink for SW<T> { };
+        impl<T: Write> Sink for SW<T> { }
         Output::new(SW(t), container, codec_id, bit_rate)
     }
 
